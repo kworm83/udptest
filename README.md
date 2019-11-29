@@ -4,7 +4,7 @@ Test program to evaluate maximum udp send/receive performance for a golang serve
 
 Borrows heavily from https://gist.github.com/jtblin/18df559cf14438223f93
 
-Ideally you would run dhcperfcli instances on a machine separate from the test server.  A sample bash script to start multiple dhcperfcli instanaces is included along with the basic config file.
+Ideally you would run dhcperfcli instances on a machine separate from the test server.  A sample bash script to start multiple dhcperfcli instanaces is included along with the basic config file.  There are notes in the files as to some additional config/work that will need to be done in order to run.
 
 Usage:
 

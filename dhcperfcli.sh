@@ -1,4 +1,5 @@
 #!/bin/bash
+# You will need to edit the path to your dhcperfcli and set your IP config
 TESTTIME=30
 
 echo "*****************" > logs/perf1.log
