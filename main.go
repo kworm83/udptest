@@ -128,8 +128,16 @@ func main() {
 		log.Printf("    %d packet processing workers\n", nbProcess)
 	}
 	log.Printf("    %d send workers\n", nbTX)
-	log.Printf("    %d receive packet buffer\n", nbRXPackets)
-	log.Printf("    %d send packet buffer\n", nbPackets)
+	if nbRXPackets == 0 {
+		log.Printf("    no receive packet buffer (ReadFrom)\n")
+	} else {
+		log.Printf("    %d receive packet buffer (ReadBatch)\n", nbRXPackets)
+	}
+	if nbPackets == 0 {
+		log.Printf("    no send packet buffer (WriteTo)\n")
+	} else {
+		log.Printf("    %d send packet buffer (WriteBatch)\n", nbPackets)
+	}
 
 	// Make queues for send and recieve
 	recvQueue = make(chan message, maxQueueSize)
@@ -202,51 +210,65 @@ func main() {
 
 // send transmits messages using WriteBatch from the sendQueue
 func send(c net.PacketConn) {
-	// get ipv4 Packet Connection so we can use batch functions
-	conn := ipv4.NewPacketConn(c)
 
-	// Create send buffer - this is probably not the best way
-	ms := make([]ipv4.Message, nbPackets)
-	for i := 0; i < len(ms); i++ {
-		ms[i].Buffers = make([][]byte, 1)
-	}
+	if nbPackets > 0 {
+		// Use WriteBatch
+		// get ipv4 Packet Connection so we can use batch functions
+		conn := ipv4.NewPacketConn(c)
 
-	// Collect up to nbPackets from the sendQueue or the 10ms timeout occurs
-	// This would introduce a 10ms delay if packets are not arriving on the
-	// queue fast enough.  10ms is an arbitrary number.
-	idx, msgcount := 0, 0
-	for {
-		select {
-		case msg := <-sendQueue:
-			ms[idx].Buffers[0] = msg.msg
-			// copy(ms[idx].Buffers[0], msg.msg)
-			ms[idx].N = len(msg.msg)
-			ms[idx].Addr = msg.addr
-			if idx == nbPackets-1 {
-				msgcount = nbPackets
-				idx = 0
-			} else {
-				idx++
+		// Create send buffer - this is probably not the best way
+		ms := make([]ipv4.Message, nbPackets)
+		for i := 0; i < len(ms); i++ {
+			ms[i].Buffers = make([][]byte, 1)
+		}
+
+		// Collect up to nbPackets from the sendQueue or the 10ms timeout occurs
+		// This would introduce a 10ms delay if packets are not arriving on the
+		// queue fast enough.  10ms is an arbitrary number.
+		idx, msgcount := 0, 0
+		for {
+			select {
+			case msg := <-sendQueue:
+				ms[idx].Buffers[0] = msg.msg
+				// copy(ms[idx].Buffers[0], msg.msg)
+				ms[idx].N = len(msg.msg)
+				ms[idx].Addr = msg.addr
+				if idx == nbPackets-1 {
+					msgcount = nbPackets
+					idx = 0
+				} else {
+					idx++
+				}
+			case <-time.After(10 * time.Millisecond):
+				if idx > 0 {
+					msgcount = idx
+					idx = 0
+				}
 			}
-		case <-time.After(10 * time.Millisecond):
-			if idx > 0 {
-				msgcount = idx
-				idx = 0
+			if msgcount == 0 {
+				continue
 			}
+			n, err := conn.WriteBatch(ms[:msgcount], 0)
+			if err != nil {
+				log.Printf("send error: %v", err)
+			}
+			if n != msgcount {
+				log.Printf("Write error: Had %d sent %d", msgcount, n)
+			}
+			// Update packets written counter
+			atomic.AddUint64(&wops, uint64(n))
+			msgcount = 0
 		}
-		if msgcount == 0 {
-			continue
+	} else {
+		for {
+			// Use normal socket WriteTo
+			msg := <-sendQueue
+			_, err := c.WriteTo(msg.msg, msg.addr)
+			if err != nil {
+				log.Printf("Error sending packet: %s\n", err)
+			}
+			atomic.AddUint64(&wops, 1)
 		}
-		n, err := conn.WriteBatch(ms[:msgcount], 0)
-		if err != nil {
-			log.Printf("send error: %v", err)
-		}
-		if n != msgcount {
-			log.Printf("Write error: Had %d sent %d", msgcount, n)
-		}
-		// Update packets written counter
-		atomic.AddUint64(&wops, uint64(n))
-		msgcount = 0
 	}
 
 }
@@ -254,43 +276,66 @@ func send(c net.PacketConn) {
 // receive packets from network and put on the receive queue or
 // start a new goroutine to process each packet received
 func receive(c net.PacketConn) {
-	// get ipv4 Packet Conn
-	conn := ipv4.NewPacketConn(c)
 
-	// create receive buffer - again probably not best way
-	ms := make([]ipv4.Message, nbRXPackets)
-	for i := 0; i < len(ms); i++ {
-		ms[i].Buffers = make([][]byte, 1)
-		ms[i].Buffers[0] = make([]byte, uDPPacketSize)
-	}
+	if nbRXPackets > 0 {
+		// Use ReadBatch
+		// get ipv4 Packet Conn
+		conn := ipv4.NewPacketConn(c)
 
-	// Receive packets using ReadBatch upto 1024 at a time
-	for {
-		n, err := conn.ReadBatch(ms, 0)
-		if err != nil {
-			log.Printf("ReadBatch error %s", err)
-			continue
+		// create receive buffer - again probably not best way
+		ms := make([]ipv4.Message, nbRXPackets)
+		for i := 0; i < len(ms); i++ {
+			ms[i].Buffers = make([][]byte, 1)
+			ms[i].Buffers[0] = make([]byte, uDPPacketSize)
 		}
-		// log.Printf("ReadBatch got %d", n)
-		for i := 0; i < n; i++ {
-			// log.Printf("msg %d - %d %s", i, ms[i].N, ms[i].Addr.String())
-			// fmt.Printf("%d %v\n", ms[i].N, ms[i].Buffers[0][0:ms[i].N-1])
-			// fmt.Printf("address of buffer %p\n", ms[i].Buffers[0])
-			// fmt.Printf("address of addr %p\n", ms[i].Addr)
-			// Make a copy of packet from buffer...according to the docs I think
-			// adding to the queue should be making a copy but it did not and let
-			// to buffer corruption when they got reused.
-			pkt := make([]byte, ms[i].N)
-			_ = copy(pkt, ms[i].Buffers[0][0:ms[i].N-1])
-			// Put message on receive queue or start a new gorouting depending on config
-			if nbProcess == -1 {
-				go handleMessage(c, ms[i].Addr, pkt)
-			} else {
-				recvQueue <- message{ms[i].Addr, pkt}
+
+		// Receive packets using ReadBatch upto 1024 at a time
+		for {
+			n, err := conn.ReadBatch(ms, 0)
+			if err != nil {
+				log.Printf("ReadBatch error %s", err)
+				continue
 			}
+			// log.Printf("ReadBatch got %d", n)
+			for i := 0; i < n; i++ {
+				// log.Printf("msg %d - %d %s", i, ms[i].N, ms[i].Addr.String())
+				// fmt.Printf("%d %v\n", ms[i].N, ms[i].Buffers[0][0:ms[i].N-1])
+				// fmt.Printf("address of buffer %p\n", ms[i].Buffers[0])
+				// fmt.Printf("address of addr %p\n", ms[i].Addr)
+				// Make a copy of packet from buffer...according to the docs I think
+				// adding to the queue should be making a copy but it did not and let
+				// to buffer corruption when they got reused.
+				pkt := make([]byte, ms[i].N)
+				_ = copy(pkt, ms[i].Buffers[0][0:ms[i].N-1])
+				// Put message on receive queue or start a new gorouting depending on config
+				if nbProcess == -1 {
+					go handleMessage(c, ms[i].Addr, pkt)
+				} else {
+					recvQueue <- message{ms[i].Addr, pkt}
+				}
+			}
+			atomic.AddUint64(&rops, 1)
+			atomic.AddUint64(&raops, uint64(n))
 		}
-		atomic.AddUint64(&rops, 1)
-		atomic.AddUint64(&raops, uint64(n))
+	} else {
+		// Use normal socket read
+		buf := make([]byte, uDPPacketSize)
+		for {
+			nbytes, addr, err := c.ReadFrom(buf)
+			if err != nil {
+				log.Printf("RX Error: %s\n", err)
+				continue
+			}
+			pkt := make([]byte, nbytes)
+			_ = copy(pkt, buf[0:nbytes-1])
+			if nbProcess == -1 {
+				go handleMessage(c, addr, pkt)
+			} else {
+				recvQueue <- message{addr, pkt}
+			}
+			atomic.AddUint64(&rops, 1)
+			atomic.AddUint64(&raops, 1)
+		}
 	}
 }
 
