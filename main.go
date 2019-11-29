@@ -59,6 +59,7 @@ var (
 	nbWorkers   int
 	nbProcess   int
 	nbPackets   int
+	nbRXPackets int
 	nbRX        int
 	nbTX        int
 	cpuprofile  string
@@ -72,6 +73,7 @@ func init() {
 	flag.IntVar(&nbRX, "rx", 0, "Number of receive workers")
 	flag.IntVar(&nbTX, "tx", 0, "Number of transmit workers")
 	flag.IntVar(&nbPackets, "packets", 100, "Number of packets to send at once")
+	flag.IntVar(&nbRXPackets, "rxpackets", 100, "Number of packets to receive at once")
 	flag.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to file")
 	flag.StringVar(&memprofile, "memprofile", "", "write memory profile to file")
 
@@ -126,6 +128,8 @@ func main() {
 		log.Printf("    %d packet processing workers\n", nbProcess)
 	}
 	log.Printf("    %d send workers\n", nbTX)
+	log.Printf("    %d receive packet buffer\n", nbRXPackets)
+	log.Printf("    %d send packet buffer\n", nbPackets)
 
 	// Make queues for send and recieve
 	recvQueue = make(chan message, maxQueueSize)
@@ -254,7 +258,7 @@ func receive(c net.PacketConn) {
 	conn := ipv4.NewPacketConn(c)
 
 	// create receive buffer - again probably not best way
-	ms := make([]ipv4.Message, 1024)
+	ms := make([]ipv4.Message, nbRXPackets)
 	for i := 0; i < len(ms); i++ {
 		ms[i].Buffers = make([][]byte, 1)
 		ms[i].Buffers[0] = make([]byte, uDPPacketSize)
